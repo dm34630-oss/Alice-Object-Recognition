@@ -1,0 +1,278 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+ <meta charset="utf-8" />
+ <meta name="viewport" content="width=device-width,initial-scale=1" />
+ <title>Browser Object Recognition (COCO-SSD)</title>
+ <style>
+   :root{
+     --bg:#0f1724; --panel:#111827; --accent:#7c3aed; --muted:#94a3b8; --card:#0b1220;
+   }
+   *{box-sizing:border-box}
+   html,body{height:100%;margin:0;font-family:Inter,system-ui,Segoe UI,Roboto,'Helvetica Neue',Arial;background:linear-gradient(180deg,var(--bg),#071024);color:#e6eef8}
+   .wrap{max-width:980px;margin:28px auto;padding:20px}
+   header{display:flex;align-items:center;gap:16px}
+   h1{font-size:20px;margin:0}
+   .controls{display:flex;gap:10px;margin-top:12px;flex-wrap:wrap;align-items:center}
+   button, label.input-file, select{
+     background:linear-gradient(180deg,rgba(255,255,255,0.02),transparent);
+     border:1px solid rgba(255,255,255,0.06);
+     padding:8px 12px;border-radius:10px;color:#fff;cursor:pointer;font-weight:600;
+   }
+   select{color:#fff;cursor:pointer}
+   label.input-file{display:inline-flex;align-items:center;gap:8px}
+   button:active{transform:translateY(1px)}
+   .stage{display:grid;grid-template-columns:1fr 320px;gap:14px;margin-top:18px}
+   .card{background:linear-gradient(180deg,rgba(255,255,255,0.02),transparent);padding:12px;border-radius:12px;border:1px solid rgba(255,255,255,0.03)}
+   .video-area{position:relative;min-height:360px;display:flex;align-items:center;justify-content:center;overflow:hidden;border-radius:10px}
+   video, canvas{max-width:100%;width:100%;height:auto;display:block}
+   canvas{position:absolute;left:0;top:0;pointer-events:none}
+   .info{font-size:13px;color:var(--muted);margin-top:8px}
+   .list{max-height:320px;overflow:auto;margin-top:8px}
+   .det-item{display:flex;justify-content:space-between;padding:6px;border-radius:8px;margin-bottom:6px;background:rgba(255,255,255,0.01)}
+   .footer{margin-top:16px;color:var(--muted);font-size:13px}
+   .small{font-size:12px;color:var(--muted)}
+   input[type=file]{display:none}
+ </style>
+</head>
+<body>
+ <div class="wrap">
+   <header>
+     <div>
+       <h1>Alice Object Recognition — Browser demo (Based On COCO-SSD)</h1>
+       <div class="small">Original LLM made by David Miranda — open & allow webcam.</div>
+     </div>
+   </header>
+
+
+   <div class="controls">
+     <button id="startBtn">Start webcam</button>
+     <button id="stopBtn" disabled>Stop webcam</button>
+     <label class="input-file">
+       <span>Upload image</span>
+       <input id="imageUpload" type="file" accept="image/*">
+     </label>
+     <button id="oneDetect" disabled>Detect single frame</button>
+     <select id="cameraSelect"></select>
+     <div id="modelStatus" class="small" style="margin-left:8px">Model: <strong id="modelText">loading...</strong></div>
+   </div>
+
+
+   <div class="stage">
+     <div class="card">
+       <div class="video-area" id="videoContainer" style="background:#010316">
+         <video id="video" playsinline autoplay muted></video>
+         <canvas id="overlay"></canvas>
+         <div id="placeholder" style="position:absolute;color:var(--muted);text-align:center;padding:10px">
+           <div style="font-size:14px">No video — start webcam or upload an image.</div>
+         </div>
+       </div>
+       <div class="info">Tip: press "Start webcam" and move common objects in view (person, bottle, chair, cup, etc.)</div>
+     </div>
+
+
+     <div class="card">
+       <h3 style="margin:0 0 8px 0">Detections</h3>
+       <div id="detectionList" class="list">
+         <div class="small">No detections yet.</div>
+       </div>
+       <div class="footer">
+         <div class="small">Model used: AL1-TP1.</div>
+         <div style="margin-top:8px" class="small">If you want custom objects you’ll need to train a model and convert it for TF.js.</div>
+       </div>
+     </div>
+   </div>
+ </div>
+
+
+ <!-- TensorFlow.js and COCO-SSD -->
+ <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.12.0/dist/tf.min.js"></script>
+ <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.2/dist/coco-ssd.min.js"></script>
+
+
+ <script>
+   const startBtn = document.getElementById('startBtn');
+   const stopBtn  = document.getElementById('stopBtn');
+   const oneDetect = document.getElementById('oneDetect');
+   const modelText = document.getElementById('modelText');
+   const video = document.getElementById('video');
+   const overlay = document.getElementById('overlay');
+   const ctx = overlay.getContext('2d');
+   const detectionList = document.getElementById('detectionList');
+   const placeholder = document.getElementById('placeholder');
+   const imageUpload = document.getElementById('imageUpload');
+   const cameraSelect = document.getElementById('cameraSelect');
+
+
+   let model = null;
+   let stream = null;
+   let rafId = null;
+   let detecting = false;
+
+
+   async function loadModel(){
+     modelText.textContent = 'loading…';
+     try{
+       model = await cocoSsd.load();
+       modelText.textContent = 'ready';
+       oneDetect.disabled = false;
+     }catch(err){
+       console.error('Model load error', err);
+       modelText.textContent = 'failed to load';
+     }
+   }
+
+
+   function resizeOverlayToVideo() {
+     overlay.width = video.videoWidth || 640;
+     overlay.height = video.videoHeight || 480;
+   }
+
+
+   async function listCameras(){
+     const devices = await navigator.mediaDevices.enumerateDevices();
+     cameraSelect.innerHTML = '';
+     devices.filter(d=>d.kind==='videoinput').forEach((device,i)=>{
+       const opt=document.createElement('option');
+       opt.value=device.deviceId;
+       opt.textContent=device.label || `Camera ${i+1}`;
+       cameraSelect.appendChild(opt);
+     });
+   }
+
+
+   async function startWebcam(deviceId){
+     if (stream) stopWebcam();
+     try{
+       stream = await navigator.mediaDevices.getUserMedia({
+         video: { deviceId: deviceId ? { exact: deviceId } : undefined }
+       });
+       video.srcObject = stream;
+       await video.play();
+       placeholder.style.display = 'none';
+       resizeOverlayToVideo();
+       stopBtn.disabled = false;
+       startBtn.disabled = true;
+       startDetectionLoop();
+     }catch(err){
+       alert('Could not access camera: ' + err.message);
+     }
+   }
+
+
+   function stopWebcam(){
+     stopBtn.disabled = true;
+     startBtn.disabled = false;
+     if (stream){
+       for (const t of stream.getTracks()) t.stop();
+       stream = null;
+     }
+     cancelAnimationFrame(rafId);
+     detecting = false;
+     ctx.clearRect(0,0,overlay.width,overlay.height);
+     placeholder.style.display = 'block';
+     detectionList.innerHTML = '<div class="small">No detections yet.</div>';
+   }
+
+
+   async function detectionLoop(){
+     if (!model) return;
+     detecting = true;
+     async function frame(){
+       if (!detecting) return;
+       if (video.readyState >= 2) {
+         resizeOverlayToVideo();
+         const preds = await model.detect(video);
+         renderPredictions(preds);
+       }
+       rafId = requestAnimationFrame(frame);
+     }
+     frame();
+   }
+
+
+   function startDetectionLoop(){
+     if (!model) {
+       alert('Model not loaded yet.');
+       return;
+     }
+     if (!stream && video.srcObject == null) return;
+     detectionLoop();
+   }
+
+
+   function renderPredictions(preds){
+     ctx.clearRect(0,0,overlay.width,overlay.height);
+     if (!preds || preds.length===0){
+       detectionList.innerHTML='<div class="small">No detections.</div>';
+       return;
+     }
+     detectionList.innerHTML='';
+     preds.forEach(p=>{
+       const [x,y,w,h]=p.bbox;
+       ctx.lineWidth=2;
+       ctx.strokeStyle='rgba(124,58,237,0.9)';
+       ctx.fillStyle='rgba(124,58,237,0.12)';
+       ctx.beginPath(); ctx.rect(x,y,w,h); ctx.fill(); ctx.stroke();
+       const label=`${p.class} ${(p.score*100).toFixed(1)}%`;
+       ctx.fillStyle='rgba(0,0,0,0.7)';
+       ctx.fillRect(x,y-20,ctx.measureText(label).width+10,20);
+       ctx.fillStyle='#fff';
+       ctx.fillText(label,x+5,y-5);
+       const item=document.createElement('div');
+       item.className='det-item';
+       item.innerHTML=`<div>${p.class}</div><div>${(p.score*100).toFixed(1)}%</div>`;
+       detectionList.appendChild(item);
+     });
+   }
+
+
+   // Events
+   startBtn.addEventListener('click', ()=> startWebcam(cameraSelect.value));
+   stopBtn.addEventListener('click', stopWebcam);
+   cameraSelect.addEventListener('change', ()=> startWebcam(cameraSelect.value));
+
+
+   oneDetect.addEventListener('click', async()=>{
+     if(!model) return;
+     if(video.readyState>=2){
+       const preds=await model.detect(video);
+       renderPredictions(preds);
+     }
+   });
+
+
+   imageUpload.addEventListener('change', (ev)=>{
+     const file=ev.target.files[0];
+     if(!file) return;
+     const img=new Image();
+     const url=URL.createObjectURL(file);
+     img.onload=async()=>{
+       video.pause(); video.srcObject=null;
+       placeholder.style.display='none';
+       overlay.width=img.width; overlay.height=img.height;
+       const tmp=document.createElement('canvas');
+       tmp.width=img.width; tmp.height=img.height;
+       tmp.getContext('2d').drawImage(img,0,0);
+       document.getElementById('videoContainer').querySelectorAll('video,img.uploadPreview').forEach(n=>n.remove());
+       const preview=document.createElement('img');
+       preview.className='uploadPreview'; preview.style.maxWidth='100%'; preview.src=url;
+       document.getElementById('videoContainer').appendChild(preview);
+       const preds=await model.detect(tmp);
+       renderPredictions(preds);
+       URL.revokeObjectURL(url);
+     };
+     img.src=url;
+     if(stream){ for(const t of stream.getTracks()) t.stop(); stream=null; }
+   });
+
+
+   video.addEventListener('loadeddata', resizeOverlayToVideo);
+
+
+   loadModel();
+   listCameras();
+   window.addEventListener('beforeunload', ()=>{ if(stream) for(const t of stream.getTracks()) t.stop(); });
+ </script>
+</body>
+</html>
